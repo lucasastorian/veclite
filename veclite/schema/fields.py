@@ -167,7 +167,10 @@ class Text(FieldDescriptor):
         self.contextualized_dim = contextualized_dim
 
         # Handle vector parameter
-        if vector is True:
+        # If contextualized=True, it takes precedence (ignore vector setting)
+        if contextualized:
+            self.vector_config = None
+        elif vector is True:
             # Use default config
             self.vector_config = VectorConfig.voyage_lite()
         elif isinstance(vector, VectorConfig):
@@ -178,10 +181,6 @@ class Text(FieldDescriptor):
             self.vector_config = None
         else:
             raise ValueError(f"vector must be True, False, or a VectorConfig instance, got {type(vector)}")
-
-        # Validate: can't have both vector and contextualized
-        if self.vector_config and contextualized:
-            raise ValueError("Cannot set both vector and contextualized=True. Use one or the other.")
 
     @property
     def vector(self) -> bool:

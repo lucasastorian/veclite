@@ -13,7 +13,7 @@ VecLite isn't a traditional ORM adapted for search — it's **purpose‑built fo
 - 🧰 **No plumbing** — embeddings + indices managed automatically
 - 🧩 **Relational + views** — enrich chunks without denormalization
 - 🔎 **Three search modes** — BM25, vector, hybrid (+ optional rerank modifier)
-- ✅ **Atomic embeddings** — batch once; no rows without vectors on failure
+- 📊 **Multiple vector fields** — embed different columns per table (title vs body)
 - 🔗 **Simple filters** — eq/in_/between/JSON contains/ilike/regex
 - 📦 **One folder** — your entire RAG + DB stack (sqlite.db + vectors/)
 - 🗂️ **No metadata limits** — normal SQL columns/JSON, any shape
@@ -27,6 +27,7 @@ VecLite isn't a traditional ORM adapted for search — it's **purpose‑built fo
 | --- | --- | --- |
 | Setup | Local‑first, zero infra | Hosted service / cluster |
 | Data model | Relational tables + views + JSON | Vector‑centric, document/NoSQL |
+| Multiple vector fields | Yes (title + body on same row) | No (1 vector per record) |
 | Non‑vector queries | Yes (filters, ranges, regex, FTS) | Limited (metadata filters only) |
 | Joins / views | Yes (via SQL views) | No |
 | Keyword search | Yes (BM25 via FTS5) | Rare / not native |
@@ -37,7 +38,6 @@ VecLite isn't a traditional ORM adapted for search — it's **purpose‑built fo
 | Metadata limits | No (normal SQL columns/JSON) | Often constrained (field count/size) |
 | Record size limits | No hard per‑row payload limit | Common (~40KB metadata payloads) |
 | Non‑vector tables | Yes (regular/FTS‑only tables) | No (vector‑centric indexes) |
-| Consistency | Atomic batch embeddings | Varies by service |
 | Storage | One folder: sqlite.db + vectors/ | Remote indexes/storage |
 | Best for | Local RAG, agents, notebooks | Production scale, multi‑tenant APIs |
 
@@ -63,25 +63,25 @@ export VOYAGE_API_KEY="your-key"  # Get from https://www.voyageai.com
 from veclite import Client, Schema
 from veclite.schema import Table, Integer, Text
 
-# 1. Define schema - embeddings happen automatically
+# Define schema
 class Document(Table):
     __tablename__ = "documents"
     id = Integer(primary_key=True)
-    content = Text(vector=True, fts=True)  # vector + keyword search
+    content = Text(vector=True, fts=True)
 
-# 2. Create database (nested folder)
+# Create database
 schema = Schema()
 schema.add_table(Document)
-client = Client.create(schema, "rag_db")  # creates ./rag_db/{sqlite.db, vectors/}
+client = Client.create(schema, "rag_db")
 
-# 3. Insert - embeddings generated automatically
+# Insert data
 client.table("documents").insert([
     {"content": "Python is a programming language"},
     {"content": "Machine learning uses neural networks"},
     {"content": "The Solar System has 8 planets"},
 ]).execute()
 
-# 4. Search by meaning (finds ML doc, not Python)
+# Search by meaning
 results = client.table("documents").vector_search(
     query="AI and deep learning",
     topk=5
@@ -89,23 +89,6 @@ results = client.table("documents").vector_search(
 ```
 
 **That's it.** No embedding pipelines, no vector databases, no infrastructure.
-
----
-
-## Atomic Batch Embeddings (Consistency)
-
-Ensure all‑or‑nothing inserts with batched embeddings:
-
-```python
-# Async example
-async with async_client.batch_embeddings():
-    await async_client.table("documents").insert([...]).execute()
-    await async_client.table("documents").insert([...]).execute()
-# If any embedding fails → rollback SQLite; no vectors written
-```
-
-- Default is atomic: one SQLite transaction; embeddings generated; vectors written; then COMMIT.
-- Non‑atomic option: `async with db.batch_embeddings(atomic=False): ...` batches for efficiency and writes failures to an outbox for later retry via `flush_vector_outbox()`.
 
 ---
 
@@ -151,62 +134,65 @@ results = client.table("docs").hybrid_search(
 ### 🎖️ Rerank Modifier (optional)
 Post-retrieval modifier to refine candidates:
 ```python
-from veclite.embeddings import VoyageClient
-
-# Get candidates with hybrid search
-candidates = client.table("docs") \
+# Chain rerank directly on query builder
+results = client.table("docs") \
     .hybrid_search("quantum computing", topk=100) \
+    .rerank(query="quantum computing applications", content_column="content", topk=10) \
     .execute()
 
-# Rerank top 100 → best 10
-embedder = VoyageClient()
-reranked = embedder.rerank(
-    query="quantum computing applications",
-    documents=[doc["content"] for doc in candidates.data],
-    top_k=10
-)
+# Retrieves 100 candidates → reranks → returns best 10
 ```
 
 **Use when:** Quality > speed (2-stage retrieval)
 
 ---
 
+## Filtered Search
 
-
-## Perfect for Agentic RAG
-
-VecLite's modular design makes it ideal for agentic systems where the AI chooses retrieval strategies:
+Combine search with SQL-like filters:
 
 ```python
-class RAGAgent:
-    def retrieve(self, query: str, strategy: str = "auto"):
-        if strategy == "auto":
-            # Agent decides based on query type
-            if self._is_technical_query(query):
-                return self.keyword_search(query)
-            else:
-                return self.hybrid_search(query)
-
-        elif strategy == "keyword":
-            return self.db.table("docs").keyword_search(query, topk=10)
-
-        elif strategy == "semantic":
-            return self.db.table("docs").vector_search(query, topk=10)
-
-        elif strategy == "hybrid":
-            return self.db.table("docs").hybrid_search(query, alpha=0.7, topk=10)
-
-        elif strategy == "deep":
-            # Two-stage: hybrid → rerank
-            candidates = self.db.table("docs").hybrid_search(query, topk=100)
-            return self.embedder.rerank(query, candidates.data, top_k=10)
+results = client.table("papers") \
+    .hybrid_search("climate impacts", alpha=0.6, topk=20) \
+    .eq("category", "science") \
+    .gt("year", 2020) \
+    .is_not_null("peer_reviewed") \
+    .execute()
 ```
 
-**Agents can:**
-- Choose search strategies dynamically
-- Combine multiple retrieval modes
-- Filter by metadata before/after search
-- Iteratively refine with different strategies
+**Available filters:** `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in_`, `between`, `is_null`, `is_not_null`, `like`, `ilike`, `regex`
+
+---
+
+## Multiple Vector Fields Per Row
+
+Unlike most vector DBs (1 vector per record), VecLite lets you embed multiple fields:
+
+```python
+class SupremeCourtCase(Table):
+    __tablename__ = "cases"
+    id = Integer(primary_key=True)
+    case_name = Text()
+    holding = Text(vector=True, fts=True)
+    facts = Text(vector=True, fts=True)
+    year = Integer()
+
+# Search by holding
+results = client.table("cases").vector_search(
+    query="privacy rights in digital age",
+    column="holding",
+    topk=5
+).execute()
+
+# Or search by facts
+results = client.table("cases").vector_search(
+    query="government surveillance of emails",
+    column="facts",
+    topk=5
+).execute()
+```
+
+**Use cases:** Legal research, academic papers (title vs abstract), products (name vs description)
 
 ---
 
@@ -285,54 +271,11 @@ class Paper(Table):
 - ✅ LMDB caching (avoid re-embedding)
 - ✅ Vector storage alongside SQLite
 
-**Supported models:**
+**Embedding options:**
 - `vector=True` → voyage-3.5-lite (512D, **default**)
 - `vector=VectorConfig.voyage_3()` → voyage-3 (1024D)
 - `vector=VectorConfig.voyage_large()` → voyage-3.5-large (1536D)
-- `contextualized=True` → voyage-context-3 (contextualized retrieval, 512D default)
-
----
-
-## Advanced Search Examples
-
-### Filtered Search
-```python
-# Search within filtered subset
-results = client.table("papers") \
-    .hybrid_search("climate impacts", alpha=0.6, topk=20) \
-    .eq("category", "science") \
-    .gt("year", 2020) \
-    .is_not_null("peer_reviewed") \
-    .execute()
-```
-
-### Multi-Field Search
-```python
-class Article(Table):
-    __tablename__ = "articles"
-    id = Integer(primary_key=True)
-    title = Text(vector=True, fts=True)
-    body = Text(vector=True, fts=True)
-
-# Search specific field
-results = client.table("articles").vector_search(
-    query="AI safety",
-    column="title",  # Search titles only
-    topk=10
-).execute()
-```
-
-### Contextualized Embeddings (Advanced RAG)
-```python
-# Better retrieval with document context
-class Filing(Table):
-    __tablename__ = "filings"
-    id = Integer(primary_key=True)
-    content = Text(contextualized=True, contextualized_dim=512, fts=True)
-
-# Each chunk embedded with awareness of surrounding chunks
-# → Higher quality retrieval for long documents
-```
+- `vector=True, contextualized=True` → voyage-context-3 (512D, better for long documents)
 
 ---
 
