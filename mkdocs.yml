@@ -1,0 +1,61 @@
+site_name: VecLite Documentation
+site_description: A modern, schema-first SQLite ORM with vector embeddings and hybrid search
+site_author: Lucas Astorian
+repo_url: https://github.com/lucasastorian/veclite
+repo_name: veclite
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+
+nav:
+  - Introduction: index.md
+  - Getting Started: getting-started/quickstart.md
+  - Search: search/overview.md
+  - SEC Filings (Recipe): recipes/sec-filings.md
+  - API Basics: api/basics.md
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/lucasastorian/veclite
