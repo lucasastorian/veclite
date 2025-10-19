@@ -15,7 +15,6 @@ VecLite isn't a traditional ORM adapted for search — it's **purpose‑built fo
 - 🔎 **Three search modes** — BM25, vector, hybrid (+ optional rerank modifier)
 - 📊 **Multiple vector fields** — embed different columns per table (title vs body)
 - 🔗 **Simple filters** — eq/in_/between/JSON contains/ilike/regex
-- 📦 **One folder** — your entire RAG + DB stack (sqlite.db + vectors/)
 - 🗂️ **No metadata limits** — normal SQL columns/JSON, any shape
 - 🧱 **Vector + non‑vector tables** — mix FTS‑only and regular tables alongside vectors
 
