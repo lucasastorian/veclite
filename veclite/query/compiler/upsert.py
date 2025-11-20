@@ -275,7 +275,7 @@ class UpsertBuilder:
         if not vector_fields:
             return
 
-        from ...context import emb_queue_var
+        from veclite.core.context import emb_queue_var
         queue = emb_queue_var.get()
         in_batch_context = queue is not None
 

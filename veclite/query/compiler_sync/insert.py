@@ -44,11 +44,14 @@ class SyncInsertBuilder:
 
         all_results = []
         if use_executemany:
+            from veclite.core.context import emb_atomic_var
             sql = f"INSERT INTO {self.dialect.q(self.table)} ({', '.join(self.dialect.q(c) for c in cols)}) VALUES ({', '.join(['?'] * num_cols)})"
             param_rows = [[row[c] for c in cols] for row in serialized_rows]
             with self.db._lock:
                 self.db.conn.executemany(sql, param_rows)
-                self.db.conn.commit()
+                # Only commit if not in atomic batch context
+                if not emb_atomic_var.get():
+                    self.db.conn.commit()
             all_results = None
         else:
             batch_size = max(1, max_vars // num_cols)

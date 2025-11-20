@@ -1,6 +1,7 @@
 """Test async batch_embeddings context manager."""
 import tempfile
 import pytest
+import pytest_asyncio
 import os
 from pathlib import Path
 from veclite import AsyncClient, Schema
@@ -8,7 +9,7 @@ from veclite.schema import Table, Integer, Text
 from tests.fixtures.mock_embedder import MockAsyncEmbedder
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def async_client_regular():
     """Create async client with regular vector field."""
     # Set fake API key for testing
@@ -36,7 +37,7 @@ async def async_client_regular():
         client.close()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def async_client_contextual():
     """Create async client with contextualized vector field."""
     # Set fake API key for testing

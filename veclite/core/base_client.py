@@ -60,7 +60,7 @@ class BaseClient(ABC):
         self._embedder_rerank_model = embedder_rerank_model
         self._embedder_cache = embedder_cache
 
-        self.conn = sqlite3.connect(self.base_path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.base_path, check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self._max_vars = None
 

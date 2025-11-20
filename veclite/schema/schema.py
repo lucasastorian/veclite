@@ -12,9 +12,17 @@ if TYPE_CHECKING:
 class Schema:
     """Central schema manager for tables - core table management only."""
 
-    def __init__(self):
+    def __init__(self, tables: List[Union[Type[Table], 'TableBuilder']] = None, views: List[Type[Table]] = None):
         self.tables: Dict[str, Type[Table]] = {}
         self.views: Dict[str, Type[Table]] = {}
+
+        # Add tables and views if provided
+        if tables:
+            for table in tables:
+                self.add_table(table)
+        if views:
+            for view in views:
+                self.add_view(view)
 
         # SQLite keywords (case-insensitive)
         self._reserved_words = {

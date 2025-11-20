@@ -219,7 +219,7 @@ class AsyncClient(BaseClient):
         # Start a transaction if atomic batching requested
         if atomic:
             with self._lock:
-                self.conn.execute("BEGIN")
+                self.conn.execute("BEGIN IMMEDIATE")
 
         try:
             yield
@@ -251,7 +251,7 @@ class AsyncClient(BaseClient):
                     texts = [text for doc in documents for text in doc["texts"]]
                     if ids and texts:
                         pending.append((table, column, ids, texts))
-                if pending:
+                if pending and not atomic:
                     await self._write_failed_groups_to_outbox(pending)
             finally:
                 if atomic:
@@ -270,7 +270,7 @@ class AsyncClient(BaseClient):
                     texts = [text for doc in documents for text in doc["texts"]]
                     if ids and texts:
                         pending.append((table, column, ids, texts))
-                if pending:
+                if pending and not atomic:
                     await self._write_failed_groups_to_outbox(pending)
             finally:
                 if atomic:

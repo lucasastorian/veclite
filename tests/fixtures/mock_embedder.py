@@ -129,6 +129,20 @@ class MockEmbedder:
             result.append(doc_embeddings)
         return result
 
+    def contextual_query_vector(self, query: str, **kwargs) -> List[float]:
+        """Return mock embedding for a contextualized query.
+
+        Args:
+            query: Query text to embed
+            **kwargs: Ignored (for compatibility with real embedder)
+
+        Returns:
+            Embedding vector
+        """
+        if query in self.mock_embeddings:
+            return self.mock_embeddings[query]
+        return [0.0] * self.dimension
+
 
 class MockAsyncEmbedder:
     """Mock async embedder that returns predefined vectors for testing."""
@@ -140,6 +154,7 @@ class MockAsyncEmbedder:
             dimension: Dimension of the embedding vectors
         """
         self.dimension = dimension
+        self.dimensions = dimension  # Alias for compatibility
         self.mock_embeddings = {}
         self.cache = None  # No caching for mock embedder
 
@@ -205,3 +220,17 @@ class MockAsyncEmbedder:
                     doc_embeddings.append([0.0] * self.dimension)
             result.append(doc_embeddings)
         return result
+
+    async def contextual_query_vector(self, query: str, **kwargs) -> List[float]:
+        """Return mock embedding for a contextualized query.
+
+        Args:
+            query: Query text to embed
+            **kwargs: Ignored (for compatibility with real embedder)
+
+        Returns:
+            Embedding vector
+        """
+        if query in self.mock_embeddings:
+            return self.mock_embeddings[query]
+        return [0.0] * self.dimension

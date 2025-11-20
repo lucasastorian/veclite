@@ -1,7 +1,11 @@
 from pathlib import Path
-from typing import Union, List, Dict, Any
+from contextlib import contextmanager
+from typing import Union, List, Dict, Any, Tuple
+import numpy as np
 from veclite.schema.schema import Schema
 from veclite.core.base_client import BaseClient
+from veclite.core.context import emb_queue_var, emb_atomic_var
+from veclite.core.errors import DatabaseError
 
 
 class Client(BaseClient):
@@ -68,7 +72,9 @@ class Client(BaseClient):
         t0 = time.time()
         with self._lock:
             rows = self._exec_unsafe(sql, params)
-            self.conn.commit()
+            # Commit per statement only if not inside atomic batch context
+            if not emb_atomic_var.get():
+                self.conn.commit()
         elapsed_ms = (time.time() - t0) * 1000
         threshold = int(os.getenv("INTELLIFIN_SLOW_SQL_MS", "2000"))
         if elapsed_ms > threshold:
@@ -186,3 +192,378 @@ class Client(BaseClient):
         client._validate_schema(auto_migrate=auto_migrate)
 
         return client
+
+    @contextmanager
+    def batch_embeddings(self, *, atomic: bool = True):
+        """Batch all embedding generation within this context.
+
+        Defers embedding generation and vector store writes until context exit,
+        allowing hundreds/thousands of texts to be embedded in a single Voyage API call.
+
+        SQL operations run normally (no transaction management). Only embeddings are batched.
+
+        Without this context:
+        - Each insert with vector fields generates embeddings immediately
+        - Example: 100 rows → 100 Voyage API calls
+
+        With this context:
+        - All inserts queue embeddings, flush at exit
+        - Example: 100 rows → ~1 Voyage API call (batches of 128)
+
+        Example:
+            # Batch embeddings across all inserts
+            with db.batch_embeddings():
+                for row in rows:
+                    db.table("docs").insert(row).execute()
+            # Exit: generate all embeddings in minimal API calls
+
+        Failed embeddings are written to the outbox for later retry via
+        flush_vector_outbox().
+        """
+        if self._closed:
+            raise DatabaseError("Cannot start embedding batch on closed database connection")
+
+        queue = {}
+        qtoken = emb_queue_var.set(queue)
+        atoken = emb_atomic_var.set(bool(atomic))
+
+        # Start a transaction if atomic batching requested
+        if atomic:
+            with self._lock:
+                self.conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            yield
+
+            failures = self._flush_embedding_queue(queue, atomic=atomic)
+
+            if failures:
+                if atomic:
+                    # Rollback DB; vectors weren't written in atomic mode
+                    with self._lock:
+                        self.conn.rollback()
+                else:
+                    self._write_failed_groups_to_outbox(failures)
+                    # Non-atomic mode: DB already committed per statement
+                return
+
+            # All embeddings succeeded
+            if atomic:
+                with self._lock:
+                    self.conn.commit()
+
+        except Exception:
+            try:
+                pending = []
+                for (table, column), documents in (queue or {}).items():
+                    if not documents:
+                        continue
+                    ids = [row_id for doc in documents for row_id in doc["ids"]]
+                    texts = [text for doc in documents for text in doc["texts"]]
+                    if ids and texts:
+                        pending.append((table, column, ids, texts))
+                if pending and not atomic:
+                    self._write_failed_groups_to_outbox(pending)
+            finally:
+                if atomic:
+                    with self._lock:
+                        self.conn.rollback()
+                emb_queue_var.reset(qtoken)
+                emb_atomic_var.reset(atoken)
+            raise
+        finally:
+            try:
+                emb_queue_var.reset(qtoken)
+                emb_atomic_var.reset(atoken)
+            except Exception:
+                pass
+
+    def _flush_embedding_queue(self, queue: Dict[Tuple[str, str], List[Dict[str, List]]], *, atomic: bool = False):
+        """Embed and store all queued texts, choosing API based on schema.
+
+        For contextualized fields: uses voyage-context-3 with preserved document boundaries
+        For standard fields: flattens and uses standard embedding API
+
+        Args:
+            queue: Maps (table, column) -> List of documents, where each document is {"ids": [...], "texts": [...]}
+
+        Returns:
+            List of failed groups for outbox retry
+        """
+        if not queue:
+            return []
+
+        if not self.embedder:
+            raise DatabaseError(
+                "Cannot generate embeddings without an embedder. "
+                "Set VOYAGE_API_KEY environment variable or avoid using vector fields."
+            )
+
+        import logging
+
+        failed_groups = []
+
+        if atomic:
+            # Two-phase: compute embeddings for all groups first; only write vectors if all succeed
+            staged: List[Tuple[str, str, List[int], List[np.ndarray]]] = []
+            for (table, column), documents in queue.items():
+                if not documents:
+                    continue
+
+                field = self.schema.get_table(table).get_fields()[column]
+                is_contextualized = getattr(field, 'contextualized', False)
+
+                try:
+                    if is_contextualized:
+                        inputs = [doc["texts"] for doc in documents]
+                        total_chunks = sum(len(doc["texts"]) for doc in documents)
+
+                        logging.debug(
+                            f"Contextualized embed {table}.{column}: "
+                            f"{len(documents)} documents, {total_chunks} chunks (atomic)"
+                        )
+
+                        nested_embeddings = self.embedder.contextualized_embed(
+                            inputs=inputs,
+                            model="voyage-context-3",
+                            input_type="document",
+                            output_dimension=self.embedder.dimensions
+                        )
+
+                        embeddings = [emb for doc_embs in nested_embeddings for emb in doc_embs]
+                    else:
+                        flat_texts = [text for doc in documents for text in doc["texts"]]
+
+                        logging.debug(
+                            f"Standard embed {table}.{column}: "
+                            f"{len(documents)} documents, {len(flat_texts)} chunks (atomic)"
+                        )
+
+                        embeddings = self.embedder.embed(flat_texts)
+
+                    all_ids = [row_id for doc in documents for row_id in doc["ids"]]
+                    vectors = [np.array(emb, dtype=np.float32) for emb in embeddings]
+
+                    if len(vectors) != len(all_ids):
+                        raise ValueError(
+                            f"Embedding count mismatch: got {len(vectors)} embeddings "
+                            f"for {len(all_ids)} IDs in {table}.{column}"
+                        )
+
+                    staged.append((table, column, all_ids, vectors))
+
+                except Exception as e:
+                    logging.error(f"Embedding failed for {table}.{column} (atomic): {e}")
+                    # Do not write any vectors in atomic mode; return as failure
+                    failed_groups.append((table, column, [row_id for doc in documents for row_id in doc["ids"]],
+                                          [text for doc in documents for text in doc["texts"]]))
+                    break
+
+            if failed_groups:
+                return failed_groups
+
+            # All embeddings succeeded → write vectors
+            for table, column, all_ids, vectors in staged:
+                vs = self.get_or_create_vector_store(table, column)
+                with self._lock:
+                    vs.add_batch(all_ids, vectors)
+
+            return []
+
+        # Non-atomic: write per group and collect failures into outbox
+        for (table, column), documents in queue.items():
+            if not documents:
+                continue
+
+            field = self.schema.get_table(table).get_fields()[column]
+            is_contextualized = getattr(field, 'contextualized', False)
+
+            try:
+                if is_contextualized:
+                    inputs = [doc["texts"] for doc in documents]
+                    total_chunks = sum(len(doc["texts"]) for doc in documents)
+
+                    logging.debug(
+                        f"Contextualized embed {table}.{column}: "
+                        f"{len(documents)} documents, {total_chunks} chunks"
+                    )
+
+                    nested_embeddings = self.embedder.contextualized_embed(
+                        inputs=inputs,
+                        model="voyage-context-3",
+                        input_type="document",
+                        output_dimension=self.embedder.dimensions
+                    )
+
+                    embeddings = [emb for doc_embs in nested_embeddings for emb in doc_embs]
+
+                else:
+                    flat_texts = [text for doc in documents for text in doc["texts"]]
+
+                    logging.debug(
+                        f"Standard embed {table}.{column}: "
+                        f"{len(documents)} documents, {len(flat_texts)} chunks"
+                    )
+
+                    embeddings = self.embedder.embed(flat_texts)
+
+                all_ids = [row_id for doc in documents for row_id in doc["ids"]]
+                vectors = [np.array(emb, dtype=np.float32) for emb in embeddings]
+
+                if len(vectors) != len(all_ids):
+                    raise ValueError(
+                        f"Embedding count mismatch: got {len(vectors)} embeddings "
+                        f"for {len(all_ids)} IDs in {table}.{column}"
+                    )
+
+                vs = self.get_or_create_vector_store(table, column)
+                with self._lock:
+                    vs.add_batch(all_ids, vectors)
+
+            except Exception as e:
+                logging.error(f"Embedding failed for {table}.{column}: {e}")
+                all_ids = [row_id for doc in documents for row_id in doc["ids"]]
+                all_texts = [text for doc in documents for text in doc["texts"]]
+                failed_groups.append((table, column, all_ids, all_texts))
+
+        return failed_groups
+
+    def _write_failed_groups_to_outbox(self, failed_groups: List[Tuple[str, str, List, List]]):
+        """Write failed embedding groups to outbox table for later retry.
+
+        Uses SHA256 hash for idempotent inserts (INSERT OR IGNORE prevents duplicates).
+
+        Args:
+            failed_groups: List of tuples (table, column, ids, texts)
+        """
+        if not failed_groups:
+            return
+
+        import logging
+        import hashlib
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        outbox_rows = []
+
+        for table, column, ids, texts in failed_groups:
+            for row_id, text in zip(ids, texts):
+                text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                outbox_rows.append((table, column, row_id, text, text_sha256, now))
+
+        if outbox_rows:
+            try:
+                with self._lock:
+                    self.conn.executemany(
+                        "INSERT OR IGNORE INTO vector_outbox "
+                        "(table_name, column_name, row_id, text, text_sha256, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        outbox_rows
+                    )
+                    self.conn.commit()
+                logging.info(f"Wrote {len(outbox_rows)} failed embeddings to vector_outbox")
+            except Exception as e:
+                logging.warning(f"Failed to write to vector_outbox: {e}")
+
+    def flush_vector_outbox(self):
+        """Retry embedding generation for all items in the vector outbox.
+
+        Call this periodically or on-demand to process failed embeddings from non-atomic mode.
+        Processes groups independently - successful groups are deleted even if others fail.
+        """
+        if not self.embedder:
+            import logging
+            logging.warning("Cannot flush vector_outbox without embedder")
+            return
+
+        import logging
+
+        with self._lock:
+            rows = self._exec_unsafe(
+                "SELECT id, table_name, column_name, row_id, text FROM vector_outbox ORDER BY created_at",
+                []
+            )
+
+        if not rows:
+            return
+
+        logging.info(f"Flushing {len(rows)} items from vector_outbox")
+
+        grouped = {}
+        for row in rows:
+            key = (row["table_name"], row["column_name"])
+            if key not in grouped:
+                grouped[key] = {"ids": [], "texts": [], "outbox_ids": []}
+            grouped[key]["ids"].append(row["row_id"])
+            grouped[key]["texts"].append(row["text"])
+            grouped[key]["outbox_ids"].append(row["id"])
+
+        succeeded_outbox_ids = []
+        for (table, column), payload in grouped.items():
+            try:
+                logging.debug(f"Retrying {len(payload['texts'])} embeddings for ({table}, {column})")
+                embeddings = self.embedder.embed(payload["texts"])
+                vectors = [np.array(emb, dtype=np.float32) for emb in embeddings]
+
+                vector_store = self.get_or_create_vector_store(table, column)
+                with self._lock:
+                    vector_store.add_batch(payload["ids"], vectors)
+
+                succeeded_outbox_ids.extend(payload["outbox_ids"])
+                logging.debug(f"Successfully retried {len(payload['texts'])} embeddings for ({table}, {column})")
+            except Exception as e:
+                logging.error(f"Failed to flush outbox group ({table}, {column}): {e}")
+
+        if succeeded_outbox_ids:
+            placeholders = ",".join("?" for _ in succeeded_outbox_ids)
+            with self._lock:
+                self.conn.execute(
+                    f"DELETE FROM vector_outbox WHERE id IN ({placeholders})",
+                    succeeded_outbox_ids
+                )
+                self.conn.commit()
+            logging.info(f"Removed {len(succeeded_outbox_ids)}/{len(rows)} processed items from vector_outbox")
+
+    def _enqueue_embedding(self, table: str, column: str, ids: List, texts: List):
+        """Enqueue embeddings for batch processing.
+
+        Each call represents ONE document's worth of chunks. Document boundaries
+        are preserved for contextualized embeddings.
+
+        Called by InsertBuilder when inside batch_embeddings() context.
+        If not inside context, embeddings should be generated immediately instead.
+
+        Args:
+            table: Table name
+            column: Column name (vector field)
+            ids: List of row IDs for this document
+            texts: List of texts to embed for this document
+
+        Raises:
+            DatabaseError: If embedder is None or wrong task context
+            ValueError: If ids and texts lengths don't match
+        """
+        if len(ids) != len(texts):
+            raise ValueError(
+                f"Mismatch in _enqueue_embedding: {len(ids)} ids but {len(texts)} texts "
+                f"for {table}.{column}"
+            )
+
+        if not self.embedder:
+            raise DatabaseError(
+                f"Cannot enqueue embeddings for {table}.{column} without embedder. "
+                "Set VOYAGE_API_KEY environment variable."
+            )
+
+        queue = emb_queue_var.get()
+        if queue is None:
+            raise RuntimeError(
+                f"Cannot enqueue embeddings for {table}.{column} outside batch_embeddings() context. "
+                f"Either use 'with db.batch_embeddings():' or generate embeddings immediately."
+            )
+
+        key = (table, column)
+        if key not in queue:
+            queue[key] = []
+
+        queue[key].append({"ids": ids, "texts": texts})
