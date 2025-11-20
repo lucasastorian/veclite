@@ -12,6 +12,33 @@ if TYPE_CHECKING:
 class Schema:
     """Central schema manager for tables - core table management only."""
 
+    # SQLite keywords (case-insensitive)
+    _reserved_words = {
+        'abort', 'action', 'add', 'after', 'all', 'alter', 'analyze', 'and', 'as', 'asc',
+        'attach', 'autoincrement', 'before', 'begin', 'between', 'by', 'cascade', 'case',
+        'cast', 'check', 'collate', 'column', 'commit', 'conflict', 'constraint', 'create',
+        'cross', 'current_date', 'current_time', 'current_timestamp', 'database', 'default',
+        'deferrable', 'deferred', 'delete', 'desc', 'detach', 'distinct', 'drop', 'each',
+        'else', 'end', 'escape', 'except', 'exclusive', 'exists', 'explain', 'fail', 'for',
+        'foreign', 'from', 'full', 'glob', 'group', 'having', 'if', 'ignore', 'immediate',
+        'in', 'index', 'indexed', 'initially', 'inner', 'insert', 'instead', 'intersect',
+        'into', 'is', 'isnull', 'join', 'key', 'left', 'like', 'limit', 'match', 'natural',
+        'no', 'not', 'notnull', 'null', 'of', 'offset', 'on', 'or', 'order', 'outer', 'plan',
+        'pragma', 'primary', 'query', 'raise', 'recursive', 'references', 'regexp', 'reindex',
+        'release', 'rename', 'replace', 'restrict', 'right', 'rollback', 'row', 'savepoint',
+        'select', 'set', 'table', 'temp', 'temporary', 'then', 'to', 'transaction', 'trigger',
+        'union', 'unique', 'update', 'using', 'vacuum', 'values', 'view', 'virtual', 'when',
+        'where', 'with', 'without'
+    }
+
+    # Engine-reserved names (case-insensitive): block user tables/views from colliding
+    # Note: _sys_* prefix is also reserved for future engine tables
+    _reserved_names = {
+        'vector_outbox',  # async embedding retry outbox
+        # Add more engine tables here as needed, e.g.:
+        # '_sys_migrations', '_sys_vectors_meta'
+    }
+
     def __init__(self, tables: List[Union[Type[Table], 'TableBuilder']] = None, views: List[Type[Table]] = None):
         self.tables: Dict[str, Type[Table]] = {}
         self.views: Dict[str, Type[Table]] = {}
@@ -23,33 +50,6 @@ class Schema:
         if views:
             for view in views:
                 self.add_view(view)
-
-        # SQLite keywords (case-insensitive)
-        self._reserved_words = {
-            'abort', 'action', 'add', 'after', 'all', 'alter', 'analyze', 'and', 'as', 'asc',
-            'attach', 'autoincrement', 'before', 'begin', 'between', 'by', 'cascade', 'case',
-            'cast', 'check', 'collate', 'column', 'commit', 'conflict', 'constraint', 'create',
-            'cross', 'current_date', 'current_time', 'current_timestamp', 'database', 'default',
-            'deferrable', 'deferred', 'delete', 'desc', 'detach', 'distinct', 'drop', 'each',
-            'else', 'end', 'escape', 'except', 'exclusive', 'exists', 'explain', 'fail', 'for',
-            'foreign', 'from', 'full', 'glob', 'group', 'having', 'if', 'ignore', 'immediate',
-            'in', 'index', 'indexed', 'initially', 'inner', 'insert', 'instead', 'intersect',
-            'into', 'is', 'isnull', 'join', 'key', 'left', 'like', 'limit', 'match', 'natural',
-            'no', 'not', 'notnull', 'null', 'of', 'offset', 'on', 'or', 'order', 'outer', 'plan',
-            'pragma', 'primary', 'query', 'raise', 'recursive', 'references', 'regexp', 'reindex',
-            'release', 'rename', 'replace', 'restrict', 'right', 'rollback', 'row', 'savepoint',
-            'select', 'set', 'table', 'temp', 'temporary', 'then', 'to', 'transaction', 'trigger',
-            'union', 'unique', 'update', 'using', 'vacuum', 'values', 'view', 'virtual', 'when',
-            'where', 'with', 'without'
-        }
-
-        # Engine-reserved names (case-insensitive): block user tables/views from colliding
-        # Note: _sys_* prefix is also reserved for future engine tables
-        self._reserved_names = {
-            'vector_outbox',  # async embedding retry outbox
-            # Add more engine tables here as needed, e.g.:
-            # '_sys_migrations', '_sys_vectors_meta'
-        }
 
     def add_table(self, table: Union[Type[Table], 'TableBuilder']) -> None:
         if hasattr(table, 'build'):
@@ -141,6 +141,11 @@ class Schema:
         if name not in self.tables:
             raise ValueError(f"Table '{name}' not found in schema.")
         return self.tables[name]
+
+    def get_view(self, name: str) -> Type[Table]:
+        if name not in self.views:
+            raise ValueError(f"View '{name}' not found in schema.")
+        return self.views[name]
 
     def update_table(self, table_cls: Type[Table]) -> None:
         """Update with modified table (e.g., after add_field)."""
