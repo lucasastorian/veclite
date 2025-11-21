@@ -91,11 +91,15 @@ class BaseClient(ABC):
         self.conn.execute("PRAGMA synchronous = NORMAL;")
         self.conn.execute("PRAGMA busy_timeout = 5000;")
 
+        # CRITICAL: Initialize embedder BEFORE provisioning schema
+        # This ensures we fail fast if VOYAGE_API_KEY is missing and schema has vector fields
+        # Otherwise we'd create a partial database (some tables but not all)
+        self._init_embedder()
+
         if _auto_provision:
             self._provision_schema_if_needed()
         self._ensure_fts_objects()
         self._init_vector_stores()
-        self._init_embedder()
 
     @abstractmethod
     def _init_embedder(self):

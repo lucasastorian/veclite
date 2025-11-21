@@ -82,6 +82,38 @@ class Client(BaseClient):
             logging.warning(f"Slow SQL ({elapsed_ms:.0f}ms): {sql[:200]}")
         return rows
 
+    @staticmethod
+    def _preflight_check_embedder(schema: Schema):
+        """Pre-flight check: Validate embedder requirements before creating database.
+
+        This prevents partial database creation if VOYAGE_API_KEY is missing.
+        """
+        # Check if schema has vector fields
+        has_vector_fields = False
+        for table_name in schema.tables:
+            table_cls = schema.get_table(table_name)
+            for field_name, field in table_cls.get_fields().items():
+                if getattr(field, 'vector', False):
+                    has_vector_fields = True
+                    break
+            if has_vector_fields:
+                break
+
+        if not has_vector_fields:
+            return  # No vector fields, no embedder needed
+
+        # Schema has vector fields - check if API key is set
+        import os
+        if 'VOYAGE_API_KEY' not in os.environ:
+            raise AssertionError(
+                f"VOYAGE_API_KEY environment variable must be set.\n\n"
+                f"Your schema has vector fields but VOYAGE_API_KEY is not set.\n"
+                f"Get your API key from https://www.voyageai.com/\n\n"
+                f"Either:\n"
+                f"  1. Set VOYAGE_API_KEY environment variable, or\n"
+                f"  2. Remove vector fields from your schema"
+            )
+
     @classmethod
     def create(
         cls,
@@ -110,7 +142,12 @@ class Client(BaseClient):
 
         Raises:
             FileExistsError: If database already exists and exist_ok=False
+            AssertionError: If schema has vector fields but VOYAGE_API_KEY is not set
         """
+        # PRE-FLIGHT CHECK: Validate API key BEFORE creating any files
+        # This prevents partial database creation if API key is missing
+        cls._preflight_check_embedder(schema)
+
         path_obj = Path(path)
 
         storage_dir = path_obj
